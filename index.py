@@ -45,6 +45,10 @@ def init_db():
                     id INTEGER PRIMARY KEY,
                     username TEXT UNIQUE
                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS admin_link (
+                    id INTEGER PRIMARY KEY,
+                    link TEXT UNIQUE
+                )''')
     conn.commit()
     conn.close()
 
@@ -111,6 +115,15 @@ def is_member_of_sponsor(user_id):
     return True
 
 
+def get_admin_link():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT link FROM admin_link LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
 def edit_panel(chat_id, msg_id, text, buttons):
     markup = types.InlineKeyboardMarkup()
     for b_text, b_data in buttons:
@@ -133,8 +146,14 @@ def start(message):
 
     if row and row[0] == 'done':
         left = days_left(row[1])
+
+        # Main menu buttons - keyboard
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add("وضعیت اشتراک ⏳", "👤 ارتباط با ادمین")
+        markup.add("📦 کالای من", "📋 لیست کالاها")
+
         bot.send_message(
-            message.chat.id, f"✅ شما قبلاً ثبت‌نام کرده‌اید.\nروزهای باقیمانده اشتراک: {left} ⏳\nبرای دریافت لیست قیمت، کد کالا یا نام آن را وارد نمایید:")
+            message.chat.id, f"برای دریافت لیست قیمت، کد کالا یا نام آن را وارد نمایید:", reply_markup=markup)
     else:
         markup = types.ReplyKeyboardMarkup(
             one_time_keyboard=True, resize_keyboard=True)
@@ -196,8 +215,11 @@ def admin_panel(message):
                ("مدیریت کانال‌های اسپانسر", "manage_sponsor")]
     if role == 'owner':
         buttons.append(("مدیریت ادمین‌ها", "manage_admins"))
-    bot.send_message(message.chat.id, "پنل مدیریت", reply_markup=types.InlineKeyboardMarkup(
-        [[types.InlineKeyboardButton(text, callback_data=data)] for text, data in buttons]))
+        buttons.append(("تنظیم لینک پشتیبانی", "set_admin_link"))
+    markup = types.InlineKeyboardMarkup()
+    for text, data in buttons:
+        markup.add(types.InlineKeyboardButton(text, callback_data=data))
+    bot.send_message(message.chat.id, "پنل مدیریت", reply_markup=markup)
 
 # ================= CALLBACK HANDLER =================
 
@@ -222,6 +244,30 @@ def callback_handler(call):
                 call.id, "هنوز عضو نشده‌اید.", show_alert=True)
         return
 
+    # Handle subscription status for all users
+    if call.data == 'subscription_status':
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT subscription_end FROM users WHERE user_id=?",
+                  (call.from_user.id,))
+        row = c.fetchone()
+        conn.close()
+        left = days_left(row[0]) if row and row[0] else 0
+        bot.answer_callback_query(
+            call.id, f"روزهای باقیمانده اشتراک: {left}", show_alert=True)
+        return
+
+    # Handle admin contact for all users
+    if call.data == 'admin_contact':
+        admin_link = get_admin_link()
+        if admin_link:
+            bot.answer_callback_query(
+                call.id, f"لینک پشتیبانی: {admin_link}", show_alert=True)
+        else:
+            bot.answer_callback_query(
+                call.id, "لینک پشتیبانی تنظیم نشده است. لطفاً با ادمین تماس بگیرید.", show_alert=True)
+        return
+
     if role not in ['owner', 'admin']:
         bot.answer_callback_query(call.id, "شما دسترسی ندارید.")
         return
@@ -236,7 +282,15 @@ def callback_handler(call):
                    ("مدیریت کانال‌های اسپانسر", "manage_sponsor")]
         if role == 'owner':
             buttons.append(("مدیریت ادمین‌ها", "manage_admins"))
+            buttons.append(("تنظیم لینک پشتیبانی", "set_admin_link"))
         edit_panel(chat_id, msg_id, "پنل مدیریت", buttons)
+        return
+
+    # --- تنظیم لینک پشتیبانی ---
+    if call.data == 'set_admin_link' and role == 'owner':
+        temp_admin_action[user_id] = 'set_admin_link'
+        bot.send_message(chat_id, "لطفاً لینک پشتیبانی جدید را ارسال کنید:")
+        return
 
     # --- لیست کاربران ---
     elif call.data == 'list_users':
@@ -292,7 +346,8 @@ def callback_handler(call):
     elif call.data.startswith("manual_days_"):
         target_id = int(call.data.split("_")[2])
         temp_admin_action[call.from_user.id] = f"manual_days_{target_id}"
-        bot.send_message(chat_id, "لطفاً تعداد روزهای اشتراک را به صورت عدد وارد کنید:")
+        bot.send_message(
+            chat_id, "لطفاً تعداد روزهای اشتراک را به صورت عدد وارد کنید:")
 
     # --- مدیریت ادمین‌ها (فقط Owner) ---
     elif call.data == 'manage_admins' and role == 'owner':
@@ -396,17 +451,34 @@ def handle_messages(message):
                     raise ValueError
                 conn = sqlite3.connect(DB_NAME)
                 c = conn.cursor()
-                c.execute("SELECT subscription_end FROM users WHERE user_id=?", (target_id,))
+                c.execute(
+                    "SELECT subscription_end FROM users WHERE user_id=?", (target_id,))
                 row = c.fetchone()
                 now = int(time.time())
                 current_end = row[0] if row and row[0] and row[0] > now else now
                 new_end = current_end + days * 86400
-                c.execute("UPDATE users SET subscription_end=? WHERE user_id=?", (new_end, target_id))
+                c.execute(
+                    "UPDATE users SET subscription_end=? WHERE user_id=?", (new_end, target_id))
                 conn.commit()
                 conn.close()
-                bot.send_message(chat_id, f"✅ اشتراک {days} روز به کاربر {target_id} اضافه شد.")
+                bot.send_message(
+                    chat_id, f"✅ اشتراک {days} روز به کاربر {target_id} اضافه شد.")
             except ValueError:
                 bot.send_message(chat_id, "❌ لطفاً یک عدد مثبت وارد کنید.")
+            del temp_admin_action[user_id]
+            return
+        elif action == 'set_admin_link':
+            link = message.text.strip()
+            if not link.startswith("http"):
+                bot.send_message(chat_id, "❌ لطفاً یک لینک معتبر ارسال کنید.")
+                return
+            conn = sqlite3.connect(DB_NAME)
+            c = conn.cursor()
+            c.execute("DELETE FROM admin_link")
+            c.execute("INSERT INTO admin_link (link) VALUES (?)", (link,))
+            conn.commit()
+            conn.close()
+            bot.send_message(chat_id, f"✅ لینک پشتیبانی به روز شد: {link}")
             del temp_admin_action[user_id]
             return
 
@@ -465,8 +537,37 @@ def handle_messages(message):
                 message.chat.id, "برای استفاده از ربات باید عضو کانال‌های اسپانسر باشید:", reply_markup=markup)
             return
         left = days_left(row[2])
-        bot.send_message(message.chat.id, f"روزهای باقیمانده اشتراک: {left} ⏳")
-        bot.send_message(message.chat.id, f"🔎 جستجو: {message.text}")
+
+        # Handle menu buttons
+        if message.text == "👤 ارتباط با ادمین":
+            admin_link = get_admin_link()
+            if admin_link:
+                markup = types.InlineKeyboardMarkup()
+                markup.add(types.InlineKeyboardButton(
+                    "شروع گفتگو 💭", url=admin_link))
+                bot.send_message(
+                    chat_id, "برای ارتباط با پشتیبانی، روی دکمه زیر کلیک کنید:", reply_markup=markup)
+            else:
+                bot.send_message(
+                    chat_id, "لینک پشتیبانی تنظیم نشده است. لطفاً با ادمین تماس بگیرید.")
+            return
+        elif message.text.startswith("وضعیت اشتراک ⏳"):
+            bot.send_message(chat_id, f"روزهای باقیمانده اشتراک: {left} ⏳")
+            return
+        elif message.text == "📋 لیست کالاها":
+            bot.send_message(chat_id, "لیست کالاها در حال حاضر خالی است.")
+            return
+        elif message.text == "📦 کالای من":
+            bot.send_message(chat_id, "شما کالایی ندارید.")
+            return
+
+        # Main menu buttons - keyboard
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add("وضعیت اشتراک ⏳", "👤 ارتباط با ادمین")
+        markup.add("📦 کالای من", "📋 لیست کالاها")
+
+        bot.send_message(
+            message.chat.id, f"🔎 جستجو: {message.text}", reply_markup=markup)
 
     else:
         bot.send_message(
