@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from telebot import TeleBot, types
 from flask import Flask, request
 import json
+import pandas as pd
 
 # ================= CONFIG =================
 load_dotenv()
@@ -59,6 +60,8 @@ init_db()
 sponsor_channels = []
 temp_admin_action = {}
 notified_channels = set()
+user_list_page = {}
+user_search_page = {}
 
 
 def load_sponsor_channels():
@@ -268,6 +271,148 @@ def callback_handler(call):
                 call.id, "لینک پشتیبانی تنظیم نشده است. لطفاً با ادمین تماس بگیرید.", show_alert=True)
         return
 
+    # Handle list pagination
+    if call.data.startswith("list_next_"):
+        page = int(call.data.split("_")[2])
+        new_page = page + 1
+        try:
+            df_products = pd.read_excel(
+                "products.xlsx", engine='openpyxl', dtype=object, usecols=['code', 'name'], parse_dates=False, na_filter=False)
+            df_products = df_products.astype(str)
+            if 'code' in df_products.columns and 'name' in df_products.columns:
+                product_lines = []
+                for _, row in df_products.iterrows():
+                    code = str(row['code']).strip()
+                    name = str(row['name']).strip()
+                    product_lines.append(f"{code} - {name}")
+                total = len(product_lines)
+                items_per_page = 50
+                offset = (new_page - 1) * items_per_page
+                shown = product_lines[offset:offset + items_per_page]
+                text = "📋 لیست کالاها:\n" + "\n".join(shown)
+                markup = types.InlineKeyboardMarkup()
+                if new_page > 1:
+                    markup.add(types.InlineKeyboardButton("قبلی", callback_data=f"list_prev_{new_page}"))
+                if offset + items_per_page < total:
+                    markup.add(types.InlineKeyboardButton("بعدی", callback_data=f"list_next_{new_page}"))
+                bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup)
+                user_list_page[call.from_user.id] = new_page
+        except Exception as e:
+            logger.error(f"Error loading product list for pagination: {e}")
+        return
+
+    elif call.data.startswith("list_prev_"):
+        page = int(call.data.split("_")[2])
+        new_page = page - 1
+        try:
+            df_products = pd.read_excel(
+                "products.xlsx", engine='openpyxl', dtype=object, usecols=['code', 'name'], parse_dates=False, na_filter=False)
+            df_products = df_products.astype(str)
+            if 'code' in df_products.columns and 'name' in df_products.columns:
+                product_lines = []
+                for _, row in df_products.iterrows():
+                    code = str(row['code']).strip()
+                    name = str(row['name']).strip()
+                    product_lines.append(f"{code} - {name}")
+                total = len(product_lines)
+                items_per_page = 50
+                offset = (new_page - 1) * items_per_page
+                shown = product_lines[offset:offset + items_per_page]
+                text = "📋 لیست کالاها:\n" + "\n".join(shown)
+                markup = types.InlineKeyboardMarkup()
+                if new_page > 1:
+                    markup.add(types.InlineKeyboardButton("قبلی", callback_data=f"list_prev_{new_page}"))
+                if offset + items_per_page < total:
+                    markup.add(types.InlineKeyboardButton("بعدی", callback_data=f"list_next_{new_page}"))
+                bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup)
+                user_list_page[call.from_user.id] = new_page
+        except Exception as e:
+            logger.error(f"Error loading product list for pagination: {e}")
+        return
+
+    # Handle search pagination
+    elif call.data.startswith("search_next_"):
+        page = int(call.data.split("_")[2])
+        new_page = page + 1
+        data = user_search_page.get(call.from_user.id)
+        if not data:
+            return
+        query = data['query']
+        try:
+            df_products = pd.read_excel(
+                "products.xlsx", engine='openpyxl', dtype=object, usecols=['id', 'code', 'mark', 'name', 'carGroup', 'price'], parse_dates=False, na_filter=False)
+            df_products = df_products.astype(str)
+            if 'code' in df_products.columns and 'name' in df_products.columns:
+                mask = df_products['code'].astype(str).str.contains(query, case=False, na=False) | \
+                    df_products['name'].astype(str).str.contains(query, case=False, na=False)
+                results = df_products[mask]
+                total_results = len(results)
+                items_per_page = 20
+                offset = (new_page - 1) * items_per_page
+                shown_results = results.iloc[offset:offset + items_per_page]
+                lines = []
+                for _, row in shown_results.iterrows():
+                    id_val = str(row.get('id', '')).strip()
+                    code = str(row['code']).strip()
+                    mark = str(row.get('mark', '')).strip()
+                    name = str(row['name']).strip()
+                    carGroup = str(row.get('carGroup', '')).strip()
+                    price = str(row.get('price', '')).strip()
+                    lines.append(
+                        f"ردیف: {id_val}\nشناسه: {code}\nمارک: {mark}\nنام کالا: {name}\nگروه خودرو: {carGroup}\nقیمت: {price} ریال")
+                text = f"🔎 جستجو: {query}\n\nنتایج جستجو:\n" + "\n\n".join(lines)
+                markup = types.InlineKeyboardMarkup()
+                if new_page > 1:
+                    markup.add(types.InlineKeyboardButton("قبلی", callback_data=f"search_prev_{new_page}"))
+                if offset + items_per_page < total_results:
+                    markup.add(types.InlineKeyboardButton("بعدی", callback_data=f"search_next_{new_page}"))
+                bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup)
+                user_search_page[call.from_user.id]['page'] = new_page
+        except Exception as e:
+            logger.error(f"Error searching products for pagination: {e}")
+        return
+
+    elif call.data.startswith("search_prev_"):
+        page = int(call.data.split("_")[2])
+        new_page = page - 1
+        data = user_search_page.get(call.from_user.id)
+        if not data:
+            return
+        query = data['query']
+        try:
+            df_products = pd.read_excel(
+                "products.xlsx", engine='openpyxl', dtype=object, usecols=['id', 'code', 'mark', 'name', 'carGroup', 'price'], parse_dates=False, na_filter=False)
+            df_products = df_products.astype(str)
+            if 'code' in df_products.columns and 'name' in df_products.columns:
+                mask = df_products['code'].astype(str).str.contains(query, case=False, na=False) | \
+                    df_products['name'].astype(str).str.contains(query, case=False, na=False)
+                results = df_products[mask]
+                total_results = len(results)
+                items_per_page = 20
+                offset = (new_page - 1) * items_per_page
+                shown_results = results.iloc[offset:offset + items_per_page]
+                lines = []
+                for _, row in shown_results.iterrows():
+                    id_val = str(row.get('id', '')).strip()
+                    code = str(row['code']).strip()
+                    mark = str(row.get('mark', '')).strip()
+                    name = str(row['name']).strip()
+                    carGroup = str(row.get('carGroup', '')).strip()
+                    price = str(row.get('price', '')).strip()
+                    lines.append(
+                        f"ردیف: {id_val}\nشناسه: {code}\nمارک: {mark}\nنام کالا: {name}\nگروه خودرو: {carGroup}\nقیمت: {price} ریال")
+                text = f"🔎 جستجو: {query}\n\nنتایج جستجو:\n" + "\n\n".join(lines)
+                markup = types.InlineKeyboardMarkup()
+                if new_page > 1:
+                    markup.add(types.InlineKeyboardButton("قبلی", callback_data=f"search_prev_{new_page}"))
+                if offset + items_per_page < total_results:
+                    markup.add(types.InlineKeyboardButton("بعدی", callback_data=f"search_next_{new_page}"))
+                bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup)
+                user_search_page[call.from_user.id]['page'] = new_page
+        except Exception as e:
+            logger.error(f"Error searching products for pagination: {e}")
+        return
+
     if role not in ['owner', 'admin']:
         bot.answer_callback_query(call.id, "شما دسترسی ندارید.")
         return
@@ -341,6 +486,7 @@ def callback_handler(call):
                   (new_end, target_id))
         conn.commit()
         conn.close()
+        bot.send_message(target_id, f"✅ اشتراک شما {days} روز تمدید شد.")
         edit_panel(chat_id, msg_id, f"✅ اشتراک {days} روز به کاربر {target_id} اضافه شد.", [
                    ("بازگشت به پنل", "main_panel")])
     elif call.data.startswith("manual_days_"):
@@ -461,6 +607,7 @@ def handle_messages(message):
                     "UPDATE users SET subscription_end=? WHERE user_id=?", (new_end, target_id))
                 conn.commit()
                 conn.close()
+                bot.send_message(target_id, f"✅ اشتراک شما {days} روز تمدید شد.")
                 bot.send_message(
                     chat_id, f"✅ اشتراک {days} روز به کاربر {target_id} اضافه شد.")
             except ValueError:
@@ -519,8 +666,15 @@ def handle_messages(message):
             conn.close()
             bot.send_message(
                 message.chat.id, f"✅ ثبت‌نام شما تکمیل شد. شهر {city} انتخاب شد.", reply_markup=types.ReplyKeyboardRemove())
+
+            # Main menu buttons - keyboard
+            markup = types.ReplyKeyboardMarkup(
+                resize_keyboard=True, row_width=2)
+            markup.add("وضعیت اشتراک ⏳", "👤 ارتباط با ادمین")
+            markup.add("📦 کالای من", "📋 لیست کالاها")
+
             bot.send_message(
-                message.chat.id, "برای دریافت لیست قیمت، کد کالا یا نام آن را وارد نمایید:")
+                message.chat.id, "برای دریافت لیست قیمت، کد کالا یا نام آن را وارد نمایید:", reply_markup=markup)
         else:
             bot.send_message(
                 message.chat.id, "❌ لطفاً فقط از لیست شهرهای نمایش داده شده انتخاب کنید.")
@@ -555,7 +709,53 @@ def handle_messages(message):
             bot.send_message(chat_id, f"روزهای باقیمانده اشتراک: {left} ⏳")
             return
         elif message.text == "📋 لیست کالاها":
-            bot.send_message(chat_id, "لیست کالاها در حال حاضر خالی است.")
+            # Check subscription before showing product list
+            if left > 0:
+                try:
+                    # Load product list from Excel file
+                    df_products = pd.read_excel(
+                        "products.xlsx", engine='openpyxl', dtype=object, usecols=['code', 'name'], parse_dates=False, na_filter=False)
+                    df_products = df_products.astype(str)
+                    # Assuming the Excel has columns 'code' and 'name'
+                    if 'code' in df_products.columns and 'name' in df_products.columns:
+                        product_lines = []
+                        for _, row in df_products.iterrows():
+                            code = str(row['code']).strip()
+                            name = str(row['name']).strip()
+                            product_lines.append(f"{code} - {name}")
+                        total = len(product_lines)
+                        page = 1
+                        items_per_page = 50
+                        offset = (page - 1) * items_per_page
+                        shown = product_lines[offset:offset + items_per_page]
+                        text = "📋 لیست کالاها:\n" + "\n".join(shown)
+                        markup = None
+                        if total > items_per_page:
+                            markup = types.InlineKeyboardMarkup()
+                            if page > 1:
+                                markup.add(types.InlineKeyboardButton("قبلی", callback_data=f"list_prev_{page}"))
+                            if offset + items_per_page < total:
+                                markup.add(types.InlineKeyboardButton("بعدی", callback_data=f"list_next_{page}"))
+                        bot.send_message(message.chat.id, text, reply_markup=markup)
+                        user_list_page[user_id] = page
+                    else:
+                        bot.send_message(
+                            message.chat.id, "فایل لیست کالاها ساختار مناسبی ندارد.")
+                except Exception as e:
+                    logger.error(f"Error loading product list: {e}")
+                    bot.send_message(
+                        message.chat.id, "خطا در بارگذاری لیست کالاها.")
+            else:
+                admin_link = get_admin_link()
+                if admin_link:
+                    markup = types.InlineKeyboardMarkup()
+                    markup.add(types.InlineKeyboardButton(
+                        "ارتباط با پشتیبانی", url=admin_link))
+                    bot.send_message(
+                        message.chat.id, "برای مشاهده لیست کالاها باید اشتراک داشته باشید. لطفاً با پشتیبانی تماس بگیرید.", reply_markup=markup)
+                else:
+                    bot.send_message(
+                        message.chat.id, "برای مشاهده لیست کالاها باید اشتراک داشته باشید. لطفاً با ادمین تماس بگیرید.")
             return
         elif message.text == "📦 کالای من":
             bot.send_message(chat_id, "شما کالایی ندارید.")
@@ -566,8 +766,69 @@ def handle_messages(message):
         markup.add("وضعیت اشتراک ⏳", "👤 ارتباط با ادمین")
         markup.add("📦 کالای من", "📋 لیست کالاها")
 
-        bot.send_message(
-            message.chat.id, f"🔎 جستجو: {message.text}", reply_markup=markup)
+        # Check subscription before searching products
+        if left > 0:
+            query = message.text.strip()
+            # Send loading message first
+            loading_msg = bot.send_message(
+                message.chat.id, f"🔄 در حال جستجو برای: {query}...")
+            try:
+                df_products = pd.read_excel(
+                    "products.xlsx", engine='openpyxl', dtype=object, usecols=['id', 'code', 'mark', 'name', 'carGroup', 'price'], parse_dates=False, na_filter=False)
+                df_products = df_products.astype(str)
+                if 'code' in df_products.columns and 'name' in df_products.columns:
+                    # Search in code or name columns (case-insensitive)
+                    mask = df_products['code'].astype(str).str.contains(query, case=False, na=False) | \
+                        df_products['name'].astype(
+                        str).str.contains(query, case=False, na=False)
+                    results = df_products[mask]
+                    if not results.empty:
+                        total_results = len(results)
+                        page = 1
+                        items_per_page = 20
+                        offset = (page - 1) * items_per_page
+                        shown_results = results.iloc[offset:offset + items_per_page]
+                        lines = []
+                        for _, row in shown_results.iterrows():
+                            id_val = str(row.get('id', '')).strip()
+                            code = str(row['code']).strip()
+                            mark = str(row.get('mark', '')).strip()
+                            name = str(row['name']).strip()
+                            carGroup = str(row.get('carGroup', '')).strip()
+                            price = str(row.get('price', '')).strip()
+                            lines.append(
+                                f"ردیف: {id_val}\nشناسه: {code}\nمارک: {mark}\nنام کالا: {name}\nگروه خودرو: {carGroup}\nقیمت: {price} ریال")
+                        text = f"🔎 جستجو: {query}\n\nنتایج جستجو:\n" + "\n\n".join(lines)
+                        markup = None
+                        if total_results > items_per_page:
+                            markup = types.InlineKeyboardMarkup()
+                            if page > 1:
+                                markup.add(types.InlineKeyboardButton("قبلی", callback_data=f"search_prev_{page}"))
+                            if offset + items_per_page < total_results:
+                                markup.add(types.InlineKeyboardButton("بعدی", callback_data=f"search_next_{page}"))
+                        bot.edit_message_text(chat_id=message.chat.id, message_id=loading_msg.message_id, text=text, reply_markup=markup)
+                        user_search_page[user_id] = {'query': query, 'page': page}
+                    else:
+                        bot.edit_message_text(chat_id=message.chat.id, message_id=loading_msg.message_id,
+                                              text=f"🔎 جستجو: {query}\n\nکالایی با این مشخصات یافت نشد.")
+                else:
+                    bot.edit_message_text(
+                        chat_id=message.chat.id, message_id=loading_msg.message_id, text="فایل لیست کالاها ساختار مناسبی ندارد.")
+            except Exception as e:
+                logger.error(f"Error searching products: {e}")
+                bot.edit_message_text(
+                    chat_id=message.chat.id, message_id=loading_msg.message_id, text="خطا در جستجوی کالاها.")
+        else:
+            admin_link = get_admin_link()
+            if admin_link:
+                markup = types.InlineKeyboardMarkup()
+                markup.add(types.InlineKeyboardButton(
+                    "ارتباط با پشتیبانی", url=admin_link))
+                bot.send_message(
+                    message.chat.id, "برای جستجوی کالا باید اشتراک داشته باشید. لطفاً با پشتیبانی تماس بگیرید.", reply_markup=markup)
+            else:
+                bot.send_message(
+                    message.chat.id, "برای جستجوی کالا باید اشتراک داشته باشید. لطفاً با ادمین تماس بگیرید.")
 
     else:
         bot.send_message(
